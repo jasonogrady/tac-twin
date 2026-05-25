@@ -41,6 +41,17 @@ The first manual dispatch I triggered hit a push race against my own `MORNING.md
 
 Cron commit history visible at https://github.com/jasonogrady/tac-twin/commits/main — each `hunter tick —` line gives the deltas.
 
+## Bonus: cross-link enrichment from pp-twin
+
+Wrote `bin/crosslink-from-pp.py` which scans your existing PowerPage archive for `zdnet.com/blog/apple/{slug}/{id}` URLs in post bodies. Each link is independent evidence a TAC post existed. First run found **16 unique TAC URLs** referenced in 20 PowerPage posts, all from 2010-2013 and none overlapping with the H1 2010 CDX enumeration. Staged as 0.90-confidence candidates.
+
+Sample (zdnet_id + slug + earliest PowerPage reference):
+- 7610 · `apples-antennagate-mea-culpa-free-case-until-sept-30-updated` · 2010-07-16
+- 12473 · `the-sheer-and-utter-failure-of-apples-online-store` · 2012-03-09
+- 12813 · `nike-fuelband-the-wearable-fitness-computer` · 2012-05-16
+
+Re-run any time more PowerPage data is recovered/merged: `bin/crosslink-from-pp.py`. Idempotent (`INSERT OR IGNORE` on the unique URL constraint).
+
 ## Architecture (the divergence from pp-twin)
 
 | | pp-twin | tac-twin |
