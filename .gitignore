@@ -1,0 +1,28 @@
+# DB artifacts — everything except the cloud-managed recovery/tac.db
+*.db
+*.db-journal
+*.db.tmp
+# cloud-managed recovery state, committed by .github/workflows/hunter.yml
+!recovery/tac.db
+
+# Tooling fetched at runtime
+mysql2sqlite
+
+# Python virtualenv
+.venv/
+
+# Node/Vite dev workspace artifacts
+tac-twin-dev/node_modules/
+tac-twin-dev/dist/
+
+# Cloudflare local state
+.wrangler/
+
+# Editor / OS / Claude session
+.DS_Store
+.claude/
+.idea/
+.vscode/
+
+# Local secrets if ever needed
+.env

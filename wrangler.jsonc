@@ -1,0 +1,6 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "tac-twin",
+  "compatibility_date": "2026-05-25",
+  "pages_build_output_dir": "./tac-twin-dev/dist"
+}

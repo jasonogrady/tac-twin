@@ -1,0 +1,80 @@
+name: hunter
+
+# Bounded recovery work on a 2h cadence. Each run picks one month-sized window
+# to enumerate (advancing a cursor through 2005-2014) and fetches a small batch.
+# Results commit back to the repo so the local merge / browser auto-fetch can pull them.
+
+on:
+  schedule:
+    - cron: "37 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Fetch batch size (default 30)"
+        required: false
+        default: "30"
+      min_confidence:
+        description: "Minimum candidate confidence (default 0.7)"
+        required: false
+        default: "0.7"
+
+concurrency:
+  group: hunter
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run tick
+        env:
+          TAC_DB: ${{ github.workspace }}/recovery/tac.db
+        run: |
+          LIMIT="${{ github.event.inputs.limit || '30' }}"
+          MIN_CONF="${{ github.event.inputs.min_confidence || '0.7' }}"
+          bin/wayback-recover.py tick \
+            --limit "$LIMIT" \
+            --min-confidence "$MIN_CONF" \
+            --no-body
+
+      - name: Status summary
+        env:
+          TAC_DB: ${{ github.workspace }}/recovery/tac.db
+        run: bin/wayback-recover.py status
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name  "hunter-bot"
+          git config user.email "hunter@users.noreply.github.com"
+          git add recovery/tac.db
+          if git diff --cached --quiet; then
+            echo "no changes — skipping commit"
+            exit 0
+          fi
+          STATS=$(sqlite3 recovery/tac.db "
+            SELECT
+              'cand=' || COUNT(*) FILTER (WHERE 1) ||
+              ' fetched=' || COUNT(*) FILTER (WHERE status='fetched') ||
+              ' pending=' || COUNT(*) FILTER (WHERE status='pending') ||
+              ' failed='  || COUNT(*) FILTER (WHERE status='failed')
+            FROM tac_recovery_candidates;")
+          REC=$(sqlite3 recovery/tac.db "SELECT COUNT(*) FROM tac_posts_recovered;")
+          git commit -m "hunter tick — recovered=$REC $STATS"
+          git push
