@@ -30,12 +30,16 @@ Full 2005-2014 sweep takes 20 ticks (10 years × 2 halves) = ~40 hours = ~2 days
 
 ## What's already in the DB
 
-From the local smoke test before pushing:
+State as of last sync (the numbers keep growing as cron ticks land):
 
-- **583 candidates** staged from Wayback's H1 2010 capture of `zdnet.com/blog/apple/*`
-- **5 recovered posts** to verify the extractor (real titles like *"First round of iPad reviews are in"*, *"12 ways the Nexus One slays the iPhone"*)
-- 567 of the 583 candidates match the canonical `/blog/apple/{slug}/{numeric-id}` pattern (high confidence 0.95)
-- 16 match the older slug-only pattern (0.70 confidence)
+- **583 candidates** staged from Wayback's H1 2010 capture (the cold-start sweep)
+- **79 recovered posts** so far — 5 from the smoke test + 74 across 4 successful cron ticks
+- **458 still pending fetch**, **44 transient failures** (Wayback rate-limited — retry/backoff handles)
+- Half-year cursor at **2006-H2** — cron has done H1 2005, H2 2005, H1 2006, H2 2006
+
+The first manual dispatch I triggered hit a push race against my own `MORNING.md` commit and failed. I fixed the workflow to retry-rebase on race, and every subsequent scheduled tick has succeeded.
+
+Cron commit history visible at https://github.com/jasonogrady/tac-twin/commits/main — each `hunter tick —` line gives the deltas.
 
 ## Architecture (the divergence from pp-twin)
 
@@ -65,6 +69,7 @@ You're the original author with non-exclusive license; you have the right to dow
 3. **No accept/reject UI controls yet.** Review queue is read-only in the Hunter tab. Apply decisions via SQL Explorer for now: `UPDATE tac_posts_recovered SET reviewed=1 WHERE id=?`.
 4. **No body extraction in the cloud committed DB.** `--no-body` is on for cron runs (keeps `recovery/tac.db` small). Bodies are fetched on demand locally at accept-time — same pattern as pp-twin.
 5. **Pages auto-deploy on git push isn't wired up.** I deployed the first build manually. To get auto-deploys: Cloudflare dashboard → Workers & Pages → tac-twin → Settings → Builds & deployments → Connect Git → set build command `cd tac-twin-dev && npm install && npm run build`, output `tac-twin-dev/dist`.
+6. **Initial workflow push had a race bug.** First manual cron dispatch failed because its push lost a race against my unrelated docs commit (it printed `hunter tick — recovered=43` then failed to push). Fixed in `d2cf055` with a retry-rebase loop. Subsequent ticks all succeeded.
 
 ## When you wake up, in priority order
 
