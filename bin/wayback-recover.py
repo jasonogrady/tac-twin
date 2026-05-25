@@ -380,30 +380,34 @@ def cmd_tick(args):
     failures_before  = conn.execute("SELECT COUNT(*) FROM tac_recovery_candidates WHERE status='failed'").fetchone()[0]
     candidates_added = 0
 
-    # Pick one month-sized window per tick from the cold-start sweep.
-    # Start at 2005-01 and advance monthly using tac_runs.notes as a cursor.
+    # Pick one half-year window per tick. CDX is sparse for narrow windows —
+    # Feb 2010 alone returns 0 URLs while H1 2010 returns 600+. Stepping a half-year
+    # at a time means each tick reliably hits at least one crawl, and a full
+    # 2005-2014 sweep completes in 20 ticks (= ~40 hours at 2h cadence).
     last = conn.execute(
         "SELECT notes FROM tac_runs WHERE kind='tick' AND notes IS NOT NULL ORDER BY id DESC LIMIT 1"
     ).fetchone()
+    cursor_y, cursor_h = 2005, 1   # cold start: H1 2005
     if last and last[0]:
         try:
-            cursor_y, cursor_m = map(int, last[0].split("-"))
-            cursor_y, cursor_m = (cursor_y, cursor_m + 1) if cursor_m < 12 else (cursor_y + 1, 1)
+            ly, lh = last[0].split("-H")
+            cursor_y, cursor_h = int(ly), int(lh)
+            cursor_h += 1
+            if cursor_h > 2:
+                cursor_y, cursor_h = cursor_y + 1, 1
         except Exception:
-            cursor_y, cursor_m = 2005, 1
-    else:
-        cursor_y, cursor_m = 2005, 1
+            pass
     if cursor_y > 2014:
-        cursor_y, cursor_m = 2005, 1   # wrap and re-sweep
-    ts_from = f"{cursor_y:04d}{cursor_m:02d}01"
-    ts_to   = f"{cursor_y:04d}{cursor_m:02d}28"
-    print(f"[tick] enumerating {ts_from}–{ts_to}")
+        cursor_y, cursor_h = 2005, 1   # wrap and re-sweep
+    ts_from = f"{cursor_y:04d}{'01' if cursor_h == 1 else '07'}01"
+    ts_to   = f"{cursor_y:04d}{'06' if cursor_h == 1 else '12'}{'30' if cursor_h == 1 else '31'}"
+    print(f"[tick] enumerating {ts_from}–{ts_to} (year {cursor_y} H{cursor_h})")
     try:
         candidates_added += enumerate_window(conn, ts_from, ts_to)
     except Exception as e:
         print(f"  window failed: {e}", file=sys.stderr)
 
-    cursor_label = f"{cursor_y:04d}-{cursor_m:02d}"
+    cursor_label = f"{cursor_y:04d}-H{cursor_h}"
     conn.execute("UPDATE tac_runs SET notes=? WHERE id=?", (cursor_label, run_id))
     conn.commit()
 
