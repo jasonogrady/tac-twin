@@ -1,5 +1,7 @@
 # Morning summary — tac-twin v0.1
 
+> **🔔 Your reminder to yourself:** *use the Mac mini, not the MacBook, for the next overnight session.* The MacBook sleeps with the lid closed (no external display) and that risks suspending my session — the Mac mini stays awake 24/7. Saved to memory so I'll surface it proactively next time too.
+
 You went to bed with a sanity-check + scaffold; you wake up to a working autonomous system.
 
 ## What shipped
