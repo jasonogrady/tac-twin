@@ -80,7 +80,10 @@ You're the original author with non-exclusive license; you have the right to dow
 3. **No accept/reject UI controls yet.** Review queue is read-only in the Hunter tab. Apply decisions via SQL Explorer for now: `UPDATE tac_posts_recovered SET reviewed=1 WHERE id=?`.
 4. **No body extraction in the cloud committed DB.** `--no-body` is on for cron runs (keeps `recovery/tac.db` small). Bodies are fetched on demand locally at accept-time — same pattern as pp-twin.
 5. **Pages auto-deploy on git push isn't wired up.** I deployed the first build manually. To get auto-deploys: Cloudflare dashboard → Workers & Pages → tac-twin → Settings → Builds & deployments → Connect Git → set build command `cd tac-twin-dev && npm install && npm run build`, output `tac-twin-dev/dist`.
-6. **Initial workflow push had a race bug.** First manual cron dispatch failed because its push lost a race against my unrelated docs commit (it printed `hunter tick — recovered=43` then failed to push). Fixed in `d2cf055` with a retry-rebase loop. Subsequent ticks all succeeded.
+6. **Workflow push had two race bugs (both fixed).**
+   - **First:** initial manual dispatch lost a push race against my unrelated docs commit. Fixed in `d2cf055` with a retry-rebase loop. Scheduled ticks succeeded after that.
+   - **Second:** when my `crosslink-from-pp.py` commit modified `tac.db` concurrently with a cron tick's own `tac.db` write, the rebase hit an unresolvable binary merge conflict. Fixed in `39092f0` with `-X theirs` so the cron's freshly-fetched data wins. Cost: concurrent local edits to `tac.db` get overwritten — re-run `bin/crosslink-from-pp.py` after a tick to re-stage.
+   - The next scheduled cron (22:13Z) is the first run with both fixes; it'll confirm the system is robust.
 
 ## When you wake up, in priority order
 
