@@ -84,6 +84,7 @@ You're the original author with non-exclusive license; you have the right to dow
    - **First:** initial manual dispatch lost a push race against my unrelated docs commit. Fixed in `d2cf055` with a retry-rebase loop. Scheduled ticks succeeded after that.
    - **Second:** when my `crosslink-from-pp.py` commit modified `tac.db` concurrently with a cron tick's own `tac.db` write, the rebase hit an unresolvable binary merge conflict. Fixed in `39092f0` with `-X theirs` so the cron's freshly-fetched data wins. Cost: concurrent local edits to `tac.db` get overwritten — re-run `bin/crosslink-from-pp.py` after a tick to re-stage.
    - The next scheduled cron (22:13Z) is the first run with both fixes; it'll confirm the system is robust.
+   - **Confirmed:** the 22:13Z tick landed cleanly — `recovered=96 cand=599 fetched=101 pending=444 failed=54`. Race fix validated, system is robust.
 
 ## When you wake up, in priority order
 
