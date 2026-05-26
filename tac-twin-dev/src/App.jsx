@@ -1,4 +1,8 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Cell,
+} from "recharts";
 
 // ─── Palettes ─────────────────────────────────────────────────────────────────
 const DARK = {
@@ -114,36 +118,12 @@ function StatCard({ label, value, color }) {
 }
 
 // ─── Hunter ───────────────────────────────────────────────────────────────────
-const CLOUD_DB_URL = "https://raw.githubusercontent.com/jasonogrady/tac-twin/main/recovery/tac.db";
-
-function Hunter({ db, onReload, onDbChange }) {
+function Hunter({ db, isCloudMode, cloudLoading, cloudError, onRefetchCloud, onReload, onDbChange }) {
   const K = useK();
   const [state, setState] = useState(null);
-  const [cloudDb, setCloudDb] = useState(null);
-  const [cloudLoading, setCloudLoading] = useState(false);
-  const [cloudError, setCloudError] = useState(null);
   const [dirty, setDirty] = useState(false);
 
-  useEffect(() => {
-    if (db || cloudDb || cloudLoading) return;
-    setCloudLoading(true);
-    (async () => {
-      try {
-        const SQL = await getSQL();
-        const r = await fetch(CLOUD_DB_URL, { cache: "no-store" });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const buf = await r.arrayBuffer();
-        setCloudDb(new SQL.Database(new Uint8Array(buf)));
-      } catch (e) {
-        setCloudError(String(e.message || e));
-      } finally {
-        setCloudLoading(false);
-      }
-    })();
-  }, [db, cloudDb, cloudLoading]);
-
-  const effectiveDb = db || cloudDb;
-  const isCloudMode = !db && !!cloudDb;
+  const effectiveDb = db;
 
   const refresh = useCallback(() => {
     if (!effectiveDb) { setState(null); return; }
@@ -273,7 +253,7 @@ bin/wayback-recover.py fetch --limit 50`}
             </button>
           )}
           {isCloudMode && (
-            <button onClick={() => { setCloudDb(null); setCloudError(null); }}
+            <button onClick={onRefetchCloud}
               style={{ cursor: "pointer", padding: "4px 12px", border: `1px solid ${K.b2}`, borderRadius: 5, fontSize: 11, color: K.gold, fontFamily: "monospace", background: "transparent" }}>
               ↻ Refetch cloud
             </button>
@@ -493,7 +473,7 @@ bin/wayback-recover.py fetch --limit 50`}
 }
 
 // ─── Reader ───────────────────────────────────────────────────────────────────
-function Reader({ db }) {
+function Reader({ db, cloudLoading, cloudError }) {
   const K = useK();
   const [posts, setPosts] = useState([]);
   const [search, setSearch] = useState("");
@@ -520,13 +500,14 @@ function Reader({ db }) {
 
   useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0; }, [selectedId]);
 
-  if (!db) return (
-    <div style={{ textAlign: "center", padding: "70px 0", color: K.muted }}>
-      <div style={{ fontSize: 36, marginBottom: 12 }}>📖</div>
-      <p style={{ fontFamily: "monospace", fontSize: 13 }}>Reader needs a loaded database.</p>
-      <p style={{ fontFamily: "monospace", fontSize: 11, marginTop: 6, color: K.border }}>
-        Switch to 🎯 Hunter — the cloud snapshot loads automatically there.
-      </p>
+  if (!db) return cloudLoading ? (
+    <div style={{ textAlign:"center", padding:"70px 0", color:K.muted, fontFamily:"monospace", fontSize:12 }}>
+      <Spinner offset={0} color={K.gold}/> loading cloud snapshot…
+    </div>
+  ) : (
+    <div style={{ textAlign:"center", padding:"70px 0", color:K.muted }}>
+      <div style={{ fontSize:36, marginBottom:12 }}>📖</div>
+      <p style={{ fontFamily:"monospace", fontSize:13 }}>{cloudError ? `⚠ ${cloudError}` : "Reader needs a loaded database."}</p>
     </div>
   );
 
@@ -656,6 +637,423 @@ function Reader({ db }) {
   );
 }
 
+// ─── Stats ────────────────────────────────────────────────────────────────────
+const ERA_YEARS  = ["2005","2006","2007","2008","2009","2010","2011","2012","2013","2014"];
+const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DOW_ABBR   = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+function heatCell(count, max, K) {
+  if (!count) return { bg: K.dim, text: K.muted };
+  const t = Math.min(count / Math.max(max, 1), 1);
+  const alpha = Math.round(40 + t * 215).toString(16).padStart(2,"0");
+  return { bg: K.gold + alpha, text: t > 0.5 ? K.ink : K.gold };
+}
+
+function buildWeekGrid(year, dayMap) {
+  const weeks = [];
+  const cur = new Date(`${year}-01-01T00:00:00`);
+  let week = Array(cur.getDay()).fill(null);
+  while (cur.getFullYear() === +year) {
+    const ds = cur.toISOString().slice(0,10);
+    week.push({ date: ds, count: dayMap[ds] || 0 });
+    if (week.length === 7) { weeks.push(week); week = []; }
+    cur.setDate(cur.getDate() + 1);
+  }
+  if (week.length) { while (week.length < 7) week.push(null); weeks.push(week); }
+  return weeks;
+}
+
+function ChartTooltip({ active, payload, label, unit = "posts" }) {
+  const K = useK();
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: K.card, border: `1px solid ${K.border}`, borderRadius: 6, padding: "7px 12px", fontFamily: "monospace", fontSize: 11 }}>
+      <div style={{ color: K.gold, marginBottom: 2 }}>{label}</div>
+      {payload.map(p => (
+        <div key={p.dataKey} style={{ color: K.text }}>{p.value.toLocaleString()} {unit}</div>
+      ))}
+    </div>
+  );
+}
+
+function Stats({ db, cloudLoading, cloudError }) {
+  const K = useK();
+  const [data, setData] = useState(null);
+  const [hoverCell, setHoverCell] = useState(null); // {yr, mo, x, y}
+  const [calYear, setCalYear] = useState("2010");
+  const [calData, setCalData] = useState(null);
+
+  useEffect(() => {
+    if (!db) { setData(null); return; }
+    const q = sql => execDb(db, sql).rows || [];
+    const scalar = (sql, d = 0) => q(sql)[0]?.n ?? d;
+
+    const tableExists = name =>
+      q(`SELECT name n FROM sqlite_master WHERE type='table' AND name='${name}'`).length > 0;
+    if (!tableExists("tac_posts_recovered")) { setData({}); return; }
+
+    const byYear  = q(`SELECT substr(post_date,1,4) k, COUNT(*) n FROM tac_posts_recovered WHERE post_date IS NOT NULL GROUP BY k ORDER BY k`);
+    const byMonth = q(`SELECT substr(post_date,6,2) k, COUNT(*) n FROM tac_posts_recovered WHERE post_date IS NOT NULL GROUP BY k ORDER BY k`);
+    const byDow   = q(`SELECT CAST(strftime('%w', substr(post_date,1,10)) AS INTEGER) k, COUNT(*) n FROM tac_posts_recovered WHERE post_date IS NOT NULL GROUP BY k ORDER BY k`);
+    const heatRaw = q(`SELECT substr(post_date,1,4) yr, substr(post_date,6,2) mo, COUNT(*) n FROM tac_posts_recovered WHERE post_date IS NOT NULL GROUP BY yr, mo`);
+    const bySource = q(`SELECT source k, COUNT(*) n FROM tac_posts_recovered GROUP BY source ORDER BY n DESC`);
+    const byConf  = q(`
+      SELECT CASE
+        WHEN confidence >= 0.95 THEN '≥0.95' WHEN confidence >= 0.90 THEN '≥0.90'
+        WHEN confidence >= 0.80 THEN '≥0.80' WHEN confidence >= 0.70 THEN '≥0.70'
+        ELSE '<0.70' END AS k, COUNT(*) n
+      FROM tac_posts_recovered GROUP BY k ORDER BY k DESC`);
+    const byReview = q(`SELECT reviewed k, COUNT(*) n FROM tac_posts_recovered GROUP BY reviewed`);
+
+    const total      = scalar(`SELECT COUNT(*) n FROM tac_posts_recovered`);
+    const hasBody    = scalar(`SELECT COUNT(*) n FROM tac_posts_recovered WHERE post_content IS NOT NULL AND post_content != ''`);
+    const idMin      = q(`SELECT MIN(zdnet_id) n FROM tac_posts_recovered`)[0]?.n;
+    const idMax      = q(`SELECT MAX(zdnet_id) n FROM tac_posts_recovered`)[0]?.n;
+    const dateMin    = q(`SELECT MIN(substr(post_date,1,10)) n FROM tac_posts_recovered WHERE post_date IS NOT NULL`)[0]?.n;
+    const dateMax    = q(`SELECT MAX(substr(post_date,1,10)) n FROM tac_posts_recovered WHERE post_date IS NOT NULL`)[0]?.n;
+    const activeMos  = scalar(`SELECT COUNT(DISTINCT substr(post_date,1,7)) n FROM tac_posts_recovered WHERE post_date IS NOT NULL`);
+    const busyDay    = q(`SELECT substr(post_date,1,10) k, COUNT(*) n FROM tac_posts_recovered WHERE post_date IS NOT NULL GROUP BY k ORDER BY n DESC LIMIT 1`)[0];
+
+    // Build heatmap: heatMap[yr][mo] = count
+    const heatMap = {};
+    ERA_YEARS.forEach(yr => { heatMap[yr] = {}; });
+    heatRaw.forEach(({ yr, mo, n }) => { if (heatMap[yr]) heatMap[yr][mo] = n; });
+
+    // Full 12-month series
+    const moSeries = MONTH_ABBR.map((label, i) => ({
+      label,
+      n: byMonth.find(r => +r.k === i+1)?.n || 0,
+    }));
+
+    // Day-of-week series
+    const dowSeries = DOW_ABBR.map((label, i) => ({
+      label,
+      n: byDow.find(r => +r.k === i)?.n || 0,
+    }));
+
+    // Best year
+    const bestYear = byYear.reduce((a, b) => b.n > (a?.n||0) ? b : a, null);
+    const bestMo   = heatRaw.reduce((a, b) => b.n > (a?.n||0) ? b : a, null);
+
+    setData({ byYear, moSeries, dowSeries, heatMap, bySource, byConf, byReview,
+      total, hasBody, idMin, idMax, dateMin, dateMax, activeMos, busyDay, bestYear, bestMo });
+  }, [db]);
+
+  // Per-year daily data for the weekly calendar
+  useEffect(() => {
+    if (!db || !calYear) { setCalData(null); return; }
+    const rows = execDb(db, `SELECT substr(post_date,1,10) k, COUNT(*) n FROM tac_posts_recovered WHERE post_date LIKE '${calYear}-%' AND post_date IS NOT NULL GROUP BY k`).rows || [];
+    const dayMap = Object.fromEntries(rows.map(r => [r.k, r.n]));
+    setCalData(buildWeekGrid(calYear, dayMap));
+  }, [db, calYear]);
+
+  if (!db) return cloudLoading ? (
+    <div style={{ textAlign:"center", padding:"70px 0", color:K.muted, fontFamily:"monospace", fontSize:12 }}>
+      <Spinner offset={0} color={K.gold}/> loading cloud snapshot…
+    </div>
+  ) : cloudError ? (
+    <div style={{ textAlign:"center", padding:"70px 0", color:K.muted }}>
+      <div style={{ fontSize:36, marginBottom:12 }}>📊</div>
+      <p style={{ fontFamily:"monospace", fontSize:13, color:K.red }}>⚠ {cloudError}</p>
+    </div>
+  ) : (
+    <div style={{ textAlign:"center", padding:"70px 0", color:K.muted }}>
+      <div style={{ fontSize:36, marginBottom:12 }}>📊</div>
+      <p style={{ fontFamily:"monospace", fontSize:13 }}>Stats needs a loaded database.</p>
+    </div>
+  );
+  if (!data) return (
+    <div style={{ color:K.muted, fontFamily:"monospace", fontSize:12, padding:20 }}>
+      <Spinner offset={0} color={K.gold}/> computing stats…
+    </div>
+  );
+  if (!data.total) return (
+    <div style={{ color:K.muted, fontFamily:"monospace", fontSize:13, padding:20 }}>
+      No recovered posts yet — stats will appear once Hunter finds posts.
+    </div>
+  );
+
+  const { byYear, moSeries, dowSeries, heatMap, bySource, byConf, byReview,
+    total, hasBody, idMin, idMax, dateMin, dateMax, activeMos, busyDay, bestYear, bestMo } = data;
+
+  const heatMax = ERA_YEARS.flatMap(yr => Object.values(heatMap[yr]||{})).reduce((a,b)=>Math.max(a,b),0);
+  const dowMax  = Math.max(...dowSeries.map(d=>d.n), 1);
+  const avgPerMo = activeMos ? (total / activeMos).toFixed(1) : "—";
+  const accepted = byReview.find(r=>r.k===1)?.n||0;
+  const pending  = byReview.find(r=>r.k===0)?.n||total;
+
+  const Pill = ({ label, value, sub, color }) => (
+    <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"14px 18px", minWidth:120 }}>
+      <div style={{ fontSize:9, fontWeight:700, color:K.muted, textTransform:"uppercase", letterSpacing:2, fontFamily:"monospace", marginBottom:6 }}>{label}</div>
+      <div style={{ fontSize:22, fontWeight:700, color:color||K.text, fontFamily:"Georgia,serif", lineHeight:1 }}>{value}</div>
+      {sub && <div style={{ fontSize:10, color:K.muted, fontFamily:"monospace", marginTop:4 }}>{sub}</div>}
+    </div>
+  );
+
+  const axisStyle = { fill:K.muted, fontSize:10, fontFamily:"monospace" };
+  const gridStyle = { stroke:K.border, strokeDasharray:"3 3" };
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:18 }}>
+        <h2 style={{ margin:0, fontFamily:"Georgia,serif", fontSize:24, fontWeight:700, letterSpacing:-.5 }}>📊 Stats</h2>
+        <span style={{ fontFamily:"monospace", fontSize:11, color:K.muted }}>The Apple Core · recovery analytics</span>
+      </div>
+
+      {/* ── Headline pills ── */}
+      <div style={{ display:"flex", flexWrap:"wrap", gap:12, marginBottom:20 }}>
+        <Pill label="📚 Recovered"    value={total.toLocaleString()}              color={K.text} />
+        <Pill label="✓ Accepted"     value={accepted.toLocaleString()}           color={K.green} />
+        <Pill label="⏳ Pending"      value={pending.toLocaleString()}            color={K.gold} />
+        <Pill label="📄 With Body"    value={hasBody.toLocaleString()}            sub={`${total ? ((hasBody/total)*100).toFixed(0) : 0}% of total`} color={hasBody ? K.blue : K.muted} />
+        <Pill label="📅 Active Months" value={activeMos.toLocaleString()}         sub={`${avgPerMo} posts/mo avg`} color={K.text} />
+        {bestYear && <Pill label="🏆 Best Year"  value={bestYear.k}             sub={`${bestYear.n} posts`} color={K.gold} />}
+        {bestMo   && <Pill label="🔥 Best Month" value={`${MONTH_ABBR[+bestMo.mo-1]} ${bestMo.yr}`} sub={`${bestMo.n} posts`} color={K.gold} />}
+        {busyDay  && <Pill label="⚡ Busiest Day" value={busyDay.k}              sub={`${busyDay.n} posts`} color={K.text} />}
+        {idMin != null && <Pill label="🔢 ID Range" value={`#${idMin}–${idMax}`} sub={`${((idMax-idMin)||0).toLocaleString()} span`} color={K.muted} />}
+      </div>
+
+      {/* ── Era heatmap ── */}
+      <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px", marginBottom:14, position:"relative" }}>
+        <SectionHeader right={<span style={{ fontFamily:"monospace", fontSize:10, color:K.muted }}>post count per month · {dateMin?.slice(0,7)} → {dateMax?.slice(0,7)}</span>}>
+          🗓 Era Overview · 2005-2014
+        </SectionHeader>
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ borderCollapse:"separate", borderSpacing:3, fontFamily:"monospace", fontSize:10 }}>
+            <thead>
+              <tr>
+                <th style={{ color:K.muted, textAlign:"right", paddingRight:8, fontWeight:400, width:40 }}></th>
+                {MONTH_ABBR.map(m => (
+                  <th key={m} style={{ color:K.muted, fontWeight:400, textAlign:"center", width:36, paddingBottom:4 }}>{m}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {ERA_YEARS.map(yr => (
+                <tr key={yr}>
+                  <td style={{ color:K.muted, textAlign:"right", paddingRight:8, fontWeight:700 }}>{yr}</td>
+                  {MONTH_ABBR.map((_, mi) => {
+                    const mo = String(mi+1).padStart(2,"0");
+                    const count = heatMap[yr]?.[mo] || 0;
+                    const cell = heatCell(count, heatMax, K);
+                    const isHovered = hoverCell?.yr===yr && hoverCell?.mo===mo;
+                    return (
+                      <td key={mo}
+                        onMouseEnter={e => { if(count||true) setHoverCell({yr,mo,count,x:e.clientX,y:e.clientY}); }}
+                        onMouseLeave={() => setHoverCell(null)}
+                        style={{
+                          width:36, height:24, background:cell.bg, borderRadius:4, cursor:"default",
+                          textAlign:"center", verticalAlign:"middle", lineHeight:"24px",
+                          color:count ? cell.text : "transparent",
+                          fontSize:9, fontWeight:700,
+                          outline: isHovered ? `2px solid ${K.gold}` : "none",
+                          transition:"background 0.1s",
+                        }}>
+                        {count || ""}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {/* Scale legend */}
+        <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:12, fontFamily:"monospace", fontSize:10, color:K.muted }}>
+          <span>less</span>
+          {[0, 0.15, 0.35, 0.6, 0.85, 1].map(t => {
+            const alpha = Math.round(40 + t * 215).toString(16).padStart(2,"0");
+            return <div key={t} style={{ width:18, height:18, borderRadius:3, background: t===0 ? K.dim : K.gold+alpha }} />;
+          })}
+          <span>more</span>
+        </div>
+        {/* Hover tooltip */}
+        {hoverCell && (
+          <div style={{ position:"fixed", left:hoverCell.x+12, top:hoverCell.y-40, zIndex:999,
+            background:K.card, border:`1px solid ${K.border}`, borderRadius:6, padding:"6px 10px",
+            fontFamily:"monospace", fontSize:11, pointerEvents:"none", boxShadow:`0 4px 16px ${K.ink}` }}>
+            <span style={{ color:K.gold }}>{MONTH_ABBR[+hoverCell.mo-1]} {hoverCell.yr}</span>
+            <span style={{ color:K.text }}>{" · "}{hoverCell.count} post{hoverCell.count!==1?"s":""}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Weekly calendar for selected year ── */}
+      <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px", marginBottom:14 }}>
+        <SectionHeader right={
+          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+            <span style={{ fontFamily:"monospace", fontSize:10, color:K.muted }}>year</span>
+            <select value={calYear} onChange={e=>setCalYear(e.target.value)}
+              style={{ background:K.surface, border:`1px solid ${K.b2}`, borderRadius:4, color:K.text,
+                fontFamily:"monospace", fontSize:11, padding:"2px 6px", outline:"none" }}>
+              {ERA_YEARS.map(y=><option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        }>
+          📆 Weekly Calendar · {calYear}
+        </SectionHeader>
+        {calData ? (
+          <div style={{ overflowX:"auto" }}>
+            <div style={{ display:"flex", gap:2, alignItems:"flex-start" }}>
+              {/* Day labels */}
+              <div style={{ display:"flex", flexDirection:"column", gap:2, marginRight:4, paddingTop:0 }}>
+                {DOW_ABBR.map((d,i) => (
+                  <div key={d} style={{ height:14, lineHeight:"14px", fontSize:9, color:K.muted, fontFamily:"monospace", width:22, textAlign:"right" }}>
+                    {i%2===0?d:""}
+                  </div>
+                ))}
+              </div>
+              {/* Week columns */}
+              {calData.map((week, wi) => (
+                <div key={wi} style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                  {week.map((day, di) => {
+                    if (!day) return <div key={di} style={{ width:14, height:14, borderRadius:2 }} />;
+                    const cell = heatCell(day.count, Math.max(heatMax,1), K);
+                    return (
+                      <div key={di}
+                        title={`${day.date}: ${day.count} post${day.count!==1?"s":""}`}
+                        style={{ width:14, height:14, borderRadius:2, background:cell.bg,
+                          cursor:day.count?"pointer":"default",
+                          outline: day.count ? `1px solid ${K.gold}33` : "none" }} />
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+            {/* Month labels below */}
+            <div style={{ display:"flex", marginLeft:26, marginTop:4, fontFamily:"monospace", fontSize:9, color:K.muted }}>
+              {calData.map((week, wi) => {
+                const firstDay = week.find(d=>d);
+                const isFirst = firstDay && firstDay.date.slice(8,10) <= "07";
+                const mo = firstDay ? +firstDay.date.slice(5,7)-1 : -1;
+                return (
+                  <div key={wi} style={{ width:16 }}>
+                    {isFirst && mo >= 0 ? MONTH_ABBR[mo].slice(0,1) : ""}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div style={{ color:K.muted, fontFamily:"monospace", fontSize:11 }}><Spinner offset={2} color={K.gold}/> building calendar…</div>
+        )}
+      </div>
+
+      {/* ── Bar charts row ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
+        {/* Posts by year */}
+        <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px" }}>
+          <SectionHeader>📅 Posts by Year</SectionHeader>
+          {byYear.length === 0 ? (
+            <div style={{ color:K.muted, fontFamily:"monospace", fontSize:11 }}>no dated posts yet</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={byYear.map(r=>({name:r.k, posts:r.n}))} margin={{top:4,right:4,left:-20,bottom:0}}>
+                <CartesianGrid {...gridStyle} vertical={false} />
+                <XAxis dataKey="name" tick={axisStyle} axisLine={false} tickLine={false} />
+                <YAxis tick={axisStyle} axisLine={false} tickLine={false} allowDecimals={false} />
+                <Tooltip content={<ChartTooltip />} cursor={{ fill:K.border+"55" }} />
+                <Bar dataKey="posts" radius={[3,3,0,0]}>
+                  {byYear.map((r,i) => <Cell key={i} fill={r.k===bestYear?.k ? K.gold : K.blue} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* Posts by month of year */}
+        <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px" }}>
+          <SectionHeader right={<span style={{ fontFamily:"monospace", fontSize:10, color:K.muted }}>all years combined</span>}>
+            📆 Posts by Month
+          </SectionHeader>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={moSeries} margin={{top:4,right:4,left:-20,bottom:0}}>
+              <CartesianGrid {...gridStyle} vertical={false} />
+              <XAxis dataKey="label" tick={axisStyle} axisLine={false} tickLine={false} />
+              <YAxis tick={axisStyle} axisLine={false} tickLine={false} allowDecimals={false} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill:K.border+"55" }} />
+              <Bar dataKey="n" radius={[3,3,0,0]}>
+                {moSeries.map((r,i) => {
+                  const peak = Math.max(...moSeries.map(m=>m.n));
+                  return <Cell key={i} fill={r.n===peak && peak>0 ? K.gold : K.blue} />;
+                })}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── Day of week + source/confidence ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
+        {/* Day of week */}
+        <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px" }}>
+          <SectionHeader right={<span style={{ fontFamily:"monospace", fontSize:10, color:K.muted }}>by snapshot date</span>}>
+            📅 Posts by Day of Week
+          </SectionHeader>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={dowSeries} margin={{top:4,right:4,left:-20,bottom:0}}>
+              <CartesianGrid {...gridStyle} vertical={false} />
+              <XAxis dataKey="label" tick={axisStyle} axisLine={false} tickLine={false} />
+              <YAxis tick={axisStyle} axisLine={false} tickLine={false} allowDecimals={false} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill:K.border+"55" }} />
+              <Bar dataKey="n" radius={[3,3,0,0]}>
+                {dowSeries.map((r,i) => <Cell key={i} fill={r.n===dowMax && dowMax>0 ? K.gold : K.green} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <div style={{ marginTop:8, fontFamily:"monospace", fontSize:10, color:K.border }}>
+            ⚠ dates are Wayback snapshot timestamps, not exact publication times
+          </div>
+        </div>
+
+        {/* Source + confidence */}
+        <div style={{ background:K.card, border:`1px solid ${K.border}`, borderRadius:10, padding:"16px 18px" }}>
+          <SectionHeader>🔬 Source & Confidence</SectionHeader>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            {/* Source */}
+            <div>
+              <div style={{ fontFamily:"monospace", fontSize:9, fontWeight:700, color:K.muted, textTransform:"uppercase", letterSpacing:2, marginBottom:8 }}>Source</div>
+              {bySource.map(r => {
+                const pct = total ? ((r.n/total)*100).toFixed(0) : 0;
+                return (
+                  <div key={r.k} style={{ marginBottom:7 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", fontFamily:"monospace", fontSize:11, marginBottom:3 }}>
+                      <span style={{ color:K.text }}>{r.k || "(unknown)"}</span>
+                      <span style={{ color:K.gold }}>{r.n}</span>
+                    </div>
+                    <div style={{ height:4, background:K.dim, borderRadius:2 }}>
+                      <div style={{ height:"100%", width:`${pct}%`, background:K.blue, borderRadius:2, transition:"width 0.3s" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {/* Confidence */}
+            <div>
+              <div style={{ fontFamily:"monospace", fontSize:9, fontWeight:700, color:K.muted, textTransform:"uppercase", letterSpacing:2, marginBottom:8 }}>Confidence</div>
+              {byConf.map(r => {
+                const pct = total ? ((r.n/total)*100).toFixed(0) : 0;
+                const color = r.k.startsWith("≥0.9") ? K.green : r.k.startsWith("≥0.8") ? K.gold : r.k.startsWith("≥0.7") ? K.blue : K.muted;
+                return (
+                  <div key={r.k} style={{ marginBottom:7 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", fontFamily:"monospace", fontSize:11, marginBottom:3 }}>
+                      <span style={{ color:K.text }}>{r.k}</span>
+                      <span style={{ color }}>{r.n}</span>
+                    </div>
+                    <div style={{ height:4, background:K.dim, borderRadius:2 }}>
+                      <div style={{ height:"100%", width:`${pct}%`, background:color, borderRadius:2, transition:"width 0.3s" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── SQL Explorer ─────────────────────────────────────────────────────────────
 function Explorer({ db, tables, sql, setSql, result, onRun }) {
   const K = useK();
@@ -754,6 +1152,8 @@ function ThemePicker({ mode, setTheme }) {
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
+const CLOUD_DB_URL = "https://raw.githubusercontent.com/jasonogrady/tac-twin/main/recovery/tac.db";
+
 export default function App() {
   const theme = useTheme();
   const { K, mode, setTheme } = theme;
@@ -764,6 +1164,37 @@ export default function App() {
   const [sql, setSql] = useState("SELECT * FROM tac_posts_recovered ORDER BY id DESC LIMIT 50;");
   const [qRes, setQRes] = useState(null);
   const [loading, setLoading] = useState(false);
+
+  // Cloud DB — fetched once, shared across all tabs
+  const [cloudDb, setCloudDb] = useState(null);
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudError, setCloudError] = useState(null);
+
+  useEffect(() => {
+    if (dbInst || cloudDb || cloudLoading) return;
+    setCloudLoading(true);
+    (async () => {
+      try {
+        const SQL = await getSQL();
+        const r = await fetch(CLOUD_DB_URL, { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const buf = await r.arrayBuffer();
+        setCloudDb(new SQL.Database(new Uint8Array(buf)));
+      } catch (e) {
+        setCloudError(String(e.message || e));
+      } finally {
+        setCloudLoading(false);
+      }
+    })();
+  }, [dbInst, cloudDb, cloudLoading]);
+
+  const effectiveDb = dbInst || cloudDb;
+  const isCloudMode = !dbInst && !!cloudDb;
+
+  const refetchCloud = useCallback(() => {
+    setCloudDb(null);
+    setCloudError(null);
+  }, []);
 
   const loadFile = useCallback(async file => {
     if (!file) return;
@@ -783,9 +1214,9 @@ export default function App() {
   }, []);
 
   const runQuery = useCallback(() => {
-    if (!dbInst) return;
-    setQRes(execDb(dbInst, sql));
-  }, [dbInst, sql]);
+    if (!effectiveDb) return;
+    setQRes(execDb(effectiveDb, sql));
+  }, [effectiveDb, sql]);
 
   const refreshTables = useCallback(() => {
     if (dbInst) setTables(getDbTables(dbInst));
@@ -793,6 +1224,7 @@ export default function App() {
 
   const TABS = [
     { id: "hunter",   label: "🎯 Hunter" },
+    { id: "stats",    label: "📊 Stats" },
     { id: "reader",   label: "📖 Reader" },
     { id: "explorer", label: "🗄 SQL Explorer" },
   ];
@@ -832,11 +1264,20 @@ export default function App() {
         </div>
 
         <div style={{ maxWidth:1480, margin:"0 auto", padding:"20px 20px 60px" }}>
-          {tab === "hunter"   && <Hunter db={dbInst} onReload={loadFile} onDbChange={refreshTables} />}
-          {tab === "reader"   && <Reader db={dbInst} />}
+          {tab === "hunter"   && (
+            <Hunter db={effectiveDb} isCloudMode={isCloudMode}
+              cloudLoading={cloudLoading} cloudError={cloudError}
+              onRefetchCloud={refetchCloud} onReload={loadFile} onDbChange={refreshTables} />
+          )}
+          {tab === "stats"    && <Stats  db={effectiveDb} cloudLoading={cloudLoading} cloudError={cloudError} />}
+          {tab === "reader"   && <Reader db={effectiveDb} cloudLoading={cloudLoading} cloudError={cloudError} />}
           {tab === "explorer" && (
-            dbInst ? (
-              <Explorer db={dbInst} tables={tables} sql={sql} setSql={setSql} result={qRes} onRun={runQuery} />
+            effectiveDb ? (
+              <Explorer db={effectiveDb} tables={tables} sql={sql} setSql={setSql} result={qRes} onRun={runQuery} />
+            ) : cloudLoading ? (
+              <div style={{ textAlign:"center", padding:"70px 0", color:K.muted, fontFamily:"monospace", fontSize:12 }}>
+                <Spinner offset={0} color={K.gold}/> loading cloud snapshot…
+              </div>
             ) : (
               <div style={{ textAlign:"center", padding:"70px 0", color:K.muted }}>
                 <div style={{ fontSize:36, marginBottom:12 }}>🗄️</div>
